@@ -163,6 +163,34 @@ def iam_caps(page):
     return out if 5 <= n <= 150 else None
 
 
+IAM_SECTORS = ["Ingénierie & Construction", "Biens d'équipement", "Financières", "Services aux entreprises", "Énergie", "Biens de consommation", "Défense", "Matériaux", "IT / R&D ext.", "Équipements & Services para-énergétiques", "Équipementiers auto.", "Médias & Communication", "Immobilier", "Transport & Logistique", "Métaux & minerais", "Santé", "Distribution spécialisée", "Divers", "Agroalimentaire", "Équipements et solutions IT"]
+
+def _iam_sectors(rows):
+    """Les libellés sur 2 lignes sont lus décalés par l'extraction PDF (« Ingénierie & » / « Construction Biens d'équipement »).
+    On recolle tous les fragments puis on les redécoupe avec la liste des secteurs connus ; si le découpage ne tombe pas
+    exactement sur le bon nombre de lignes, le bloc est ignoré (la page garde ses chiffres précédents)."""
+    import unicodedata
+    def nz(x):
+        x = unicodedata.normalize("NFD", x); x = "".join(c for c in x if unicodedata.category(c) != "Mn").lower()
+        return re.sub(r"\s+", " ", re.sub(r"-\s+", "-", x)).strip()
+    alias = {"Bien de consommation": "Biens de consommation", "Équipementiers auto": "Équipementiers auto.", "Equipementiers": "Équipementiers auto."}
+    known = sorted([(nz(k), k) for k in IAM_SECTORS] + [(nz(a), v) for a, v in alias.items()], key=lambda t: -len(t[0]))
+    stream = nz(" ".join(r[0] for r in rows)); n = len(rows)
+    def seg(pos, acc):
+        if pos >= len(stream): return acc if len(acc) == n else None
+        if len(acc) >= n: return None
+        if len(acc) == n - 1:   # dernier libellé coupé par le cadrage (« Equipements et » pour « Equipements et solutions IT »)
+            rest = stream[pos:]
+            cand = [lab for key, lab in known if key.startswith(rest) and len(rest) >= 8]
+            if len(set(cand)) == 1: return acc + [cand[0]]
+        for key, lab in known:
+            if stream.startswith(key, pos) and (pos + len(key) == len(stream) or stream[pos + len(key)] == " "):
+                r = seg(pos + len(key) + 1, acc + [lab])
+                if r: return r
+        return None
+    labs = seg(0, [])
+    return [[l, r[1]] for l, r in zip(labs, rows)] if labs else None
+
 def iam_report(page, label="Europe Mid"):
     """Relit les blocs de la page 2 du reporting. Chaque bloc est validé séparément :
     un bloc illisible est omis (le widget garde alors ses chiffres précédents et l'indique)."""
@@ -170,8 +198,8 @@ def iam_report(page, label="Europe Mid"):
     try:  # secteurs
         t = _crop(page, .60, .09, .78, .60)
         t = t.split("Pondération", 1)[-1].split("Total", 1)[0]
-        r = _rows(t)
-        if 8 <= len(r) <= 25 and 97 <= sum(x[1] for x in r) <= 103: out["sectors"] = r
+        r = _iam_sectors(_rows(t))
+        if r and 8 <= len(r) <= 25 and 97 <= sum(x[1] for x in r) <= 103: out["sectors"] = r
     except Exception as e: print("rapport : secteurs", e, file=sys.stderr)
     try:  # variations
         t = _crop(page, 0, .64, .60, 1.0)
