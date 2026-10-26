@@ -249,9 +249,36 @@ def independance():
     if report: out["report"] = report
     return {k: v for k, v in out.items() if v is not None}
 
+IAM_AJAX = "https://www.independance-am.com/wp-admin/admin-ajax.php"
+
+def _iam_chart(date_filter):
+    """Série 'base 100' du fonds et de son indice, telle qu'affichée sur la page du fonds (même appel que le site)."""
+    import urllib.parse
+    body = urllib.parse.urlencode({"action": "load_chart", "fund_1": "ie-europe-mid-i", "fund_2": "stoxx-europe-mid", "date_filter": date_filter}).encode()
+    req = urllib.request.Request(IAM_AJAX, data=body, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://www.independance-am.com", "Referer": IAM_PAGE, "Accept": "application/json, text/javascript, */*; q=0.01"})
+    j = json.loads(urllib.request.urlopen(req, timeout=60).read().decode("utf8"))
+    if not j.get("success"): raise ValueError("réponse négative du site")
+    d = j["data"]; st = json.loads(d["stats"]); a, b = st["ie-europe-mid-i"], st["stoxx-europe-mid"]
+    if len(a) != len(b) or len(a) < 100: raise ValueError("série trop courte")
+    pts = [[round(x[0] / 86400000), x[1], y[1]] for x, y in zip(a, b)]
+    if any(pts[i][0] >= pts[i + 1][0] for i in range(len(pts) - 1)): raise ValueError("dates non croissantes")
+    if not all(30 < v < 1000 for q in pts for v in q[1:]): raise ValueError("valeurs aberrantes")
+    def pk(x): return {"cum": re.sub(r"(&nbsp;|\xa0)", " ", x["cumulativePerformance"]), "ann": re.sub(r"(&nbsp;|\xa0)", " ", x["annualizedPerformance"]), "vl": x["vl"], "from": x["fromDate"], "to": x["toDate"]}
+    return {"period": d.get("period"), "f": pk(d["array_stats"]["fund1"]), "b": pk(d["array_stats"]["fund2"]), "p": pts}
+
+def independance_perf():
+    out = {}
+    for key, flt in (("all", "all"), ("y1", "1")):
+        try: out[key] = _iam_chart(flt)
+        except Exception as e: print("independance perf", key, ":", e, file=sys.stderr)
+    return {"id": "independance-am", "perf": out} if out else None
+
 def main():
     funds = []
-    for job in [fundsmith_13f, independance] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f, independance, independance_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
