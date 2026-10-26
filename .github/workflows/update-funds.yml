@@ -14,4 +14,4 @@ jobs:
       - run: python scripts/update_funds.py
       - run: |
           git config user.name "izily-bot"; git config user.email "bot@users.noreply.github.com"
-          git add data/funds.json; git diff --cached --quiet || (git commit -m "maj funds.json" && git push)
+          git add data; git diff --cached --quiet || (git commit -m "maj funds.json" && git push)
