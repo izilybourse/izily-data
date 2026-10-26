@@ -684,6 +684,17 @@ def sextant_perf():
     if len(y1) >= 50: out["y1"] = build(y1, "1Y")
     if "YTD" in P:
         full["f"]["ytd"] = fm(P["YTD"]["fund"]); full["b"]["ytd"] = fm(P["YTD"]["benchmark"])
+    # indice : courbe non publiée -> points déduits des performances officielles (origine, 1 an, YTD), tracés en pointillés
+    try:
+        bi, b1, by = (P[k]["benchmark"] for k in ("Inception", "1Y", "YTD"))
+        E = 100 * (1 + bi); yd = (y1[0][0] if len(y1) >= 50 else last - 365)
+        d31 = round(dt.datetime(dt.datetime.fromtimestamp(last * 86400, dt.timezone.utc).year - 1, 12, 31, tzinfo=dt.timezone.utc).timestamp() / 86400)
+        vy, vt = E / (1 + b1), E / (1 + by)
+        if ser[0][0] < yd < d31 < last:
+            full["bsp"] = [[ser[0][0], 100.0], [yd, round(vy, 2)], [d31, round(vt, 2)], [last, round(E, 2)]]
+            if "y1" in out: out["y1"]["bsp"] = [[yd, 100.0], [d31, round(100 * vt / vy, 2)], [last, round(100 * E / vy, 2)]]
+    except (KeyError, TypeError, ZeroDivisionError):
+        pass
     return {"id": "amiral", "perf": out}
 
 
@@ -738,6 +749,17 @@ def fundsmith():
     if rep: out["report"] = rep
     return out if len(out) > 2 else None
 
+def iwda_monthly():
+    """Clôtures mensuelles de l'ETF iShares Core MSCI World (IWDA.AS, EUR, capitalisation) : proxy de l'indice MSCI World net."""
+    req = urllib.request.Request("https://query1.finance.yahoo.com/v8/finance/chart/IWDA.AS?range=max&interval=1mo", headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+    d = json.loads(urllib.request.urlopen(req, timeout=60).read())["chart"]["result"][0]
+    out = {}
+    for t, c in zip(d["timestamp"], d["indicators"]["quote"][0]["close"]):
+        if c is None: continue
+        x = datetime.datetime.fromtimestamp(t + 7200, datetime.timezone.utc); out[(x.year, x.month)] = float(c)
+    if len(out) < 100: raise ValueError("série IWDA trop courte")
+    return out
+
 def fundsmith_perf():
     """Courbe base 100 chaînée à partir du tableau des rendements mensuels (classe T Acc, EUR) + statistiques de la fiche."""
     import datetime as dt, calendar
@@ -761,13 +783,22 @@ def fundsmith_perf():
     ann = (last[1] / 100) ** (1 / yrs) * 100 - 100
     p12 = pts[-13:]; y1 = [[d, round(100 * x / p12[0][1], 2)] for d, x in p12]
     mk = lambda c, a, p, vl="": {"cum": fm(c), "ann": fm(a), "vl": vl, "from": iso(p[0][0]), "to": iso(p[-1][0])}
+    # indice de référence : proxy ETF (3e colonne). En cas d'échec, la tâche échoue et la page garde ses données intégrées.
+    mw = iwda_monthly()
+    mo = lambda d: ((dt.date(1970, 1, 1) + dt.timedelta(days=d)).year, (dt.date(1970, 1, 1) + dt.timedelta(days=d)).month)
+    def with_b(pp):
+        base = mw[mo(pp[0][0])]
+        return [[d, v, round(100 * mw[mo(d)] / base, 2)] for d, v in pp]
+    pts = with_b(pts); y1 = with_b(y1); p12 = y1
     allp = {"period": dt.date.fromordinal(dt.date(1970, 1, 1).toordinal() + pts[0][0] + 1).strftime("%d/%m/%Y"), "f": mk(last[1] - 100, ann, pts), "b": mk(0, 0, pts), "p": pts}
-    allp["b"] = {"cum": "", "ann": "", "vl": "", "from": iso(pts[0][0]), "to": iso(last[0])}
+    rb = pts[-1][2] / 100; ab = rb ** (1 / yrs)
+    allp["b"] = {"cum": fm((rb - 1) * 100), "ann": fm((ab - 1) * 100), "vl": "", "from": iso(pts[0][0]), "to": iso(last[0])}
+    allp["f"]["cum"] = fm(pts[-1][1] - 100)
     mv = re.search(r"T Class Acc\s+[\d.]+%\s+EUR [\d\s]+\s+([\d.]+)\s*€", t)
     if mv: allp["f"]["vl"] = mv.group(1).replace(".", ",")
     ytd = re.search(r"Fundsmith\d?\s+[+-]?\d+\.\d\s+([+-]?\d+\.\d)", t)
     if ytd: allp["f"]["ytd"] = fm(_num(ytd.group(1)))
-    y1blk = {"period": dt.date.fromordinal(dt.date(1970, 1, 1).toordinal() + p12[0][0]).strftime("%d/%m/%Y"), "f": mk(p12[-1][1] / p12[0][1] * 100 - 100, p12[-1][1] / p12[0][1] * 100 - 100, p12), "b": {"cum": "", "ann": "", "vl": "", "from": iso(p12[0][0]), "to": iso(p12[-1][0])}, "p": y1}
+    y1blk = {"period": dt.date.fromordinal(dt.date(1970, 1, 1).toordinal() + p12[0][0]).strftime("%d/%m/%Y"), "f": mk(p12[-1][1] / p12[0][1] * 100 - 100, p12[-1][1] / p12[0][1] * 100 - 100, p12), "b": {"cum": fm(p12[-1][2] - 100), "ann": fm(p12[-1][2] - 100), "vl": "", "from": iso(p12[0][0]), "to": iso(p12[-1][0])}, "p": y1}
     return {"id": "fundsmith", "perf": {"all": allp, "y1": y1blk}}
 
 def block_perf(t):
