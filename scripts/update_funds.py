@@ -11,7 +11,7 @@ import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "gaylussac": "", "amiral": "",
+    "comgest": "", "amiral": "",
 }
 
 def get(url):
@@ -475,9 +475,115 @@ def hmg_perf():
         except Exception as e: print("hmg perf", key, ":", e, file=sys.stderr)
     return {"id": "hmg", "perf": out} if out else None
 
+# ---------------------------------------------------------------- Gay-Lussac Gestion (Microcaps Europe, part I)
+GL_PAGE = "https://www.gaylussacgestion.com/gestion-de-fonds/microcaps-europe/"
+GL_ISIN = "FR001400QDM4"
+
+def _gl_page():
+    return urllib.request.urlopen(urllib.request.Request(GL_PAGE, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124 Safari/537.36"}), timeout=60).read().decode("utf8", "ignore")
+
+def gaylussac():
+    """Dernier reporting mensuel PDF : KPI, 5 premières lignes, capitalisations, géographie, secteurs, performances."""
+    import pdfplumber
+    html = _gl_page()
+    links = [u for u in re.findall(r'value=["\']([^"\']*reporting-financier-mensuel[^"\']*\.pdf)', html, re.I)]
+    pref = [u for u in links if "QDM4" in u.upper()] or [u for u in links if "microcaps" in u.lower()] or links
+    if not pref: return None
+    key = lambda u: (lambda m: (int(m.group(2)), int(m.group(1))) if m else (0, 0))(re.search(r"(\d{2})[_-](\d{4})", u))
+    url = max(pref, key=key)
+    if url.startswith("/"): url = "https://www.gaylussacgestion.com" + url
+    with pdfplumber.open(io.BytesIO(get(url.replace(" ", "%20")))) as pdf:
+        pg = pdf.pages[0]; t = pg.extract_text() or ""; words = pg.extract_words()
+    out = {"id": "gaylussac", "url": GL_PAGE}; rep = {}
+    mois = {"janvier": "01", "février": "02", "mars": "03", "avril": "04", "mai": "05", "juin": "06", "juillet": "07", "août": "08", "septembre": "09", "octobre": "10", "novembre": "11", "décembre": "12"}
+    m = re.search(r"\d{1,2}\s+([a-zéû]+)\s+(\d{4})", t, re.I)
+    if m and m.group(1).lower() in mois:
+        import calendar
+        mo, yr = int(mois[m.group(1).lower()]), int(m.group(2))
+        out["asOf"] = f"{calendar.monthrange(yr, mo)[1]:02d}/{mo:02d}/{yr}"; rep["asOf"] = m.group(1).lower() + " " + m.group(2)
+    m = re.search(r"Actif net de la part\s+(\d[\d,]*)\s*M€", t)
+    if m: out["aum"] = m.group(1).replace(".", ",") + " M€"
+    m = re.search(r"Nombre de lignes\s+(\d{2,3})", t)
+    if m: out["nbHoldings"] = int(m.group(1))
+    top = re.findall(r"^([A-Z0-9&.'\- ]{3,40}?)\s+(\d{1,2},\d)%", t, re.M)
+    hold = [{"name": _fixname(n.strip().title()), "ticker": "", "pct": _f(p)} for n, p in top if not n.startswith(("TAUX", "NOMBRE", "PER", "VE"))][:5]
+    if len(hold) == 5: out["holdings"] = hold; out["holdingsLabel"] = "Cinq premières positions (reporting mensuel, part I)"
+    # capitalisations
+    cb = []
+    for lab, rx in (("< 150 M€", r"Moins de 150 M€\s+(\d{1,2},\d)%"), ("150 – 500 M€", r"De 150 à 500 M€\s+(\d{1,2},\d)%"), ("> 500 M€", r"Plus de 500 M€\s+(\d{1,2},\d)%")):
+        m = re.search(rx, t)
+        if m: cb.append([lab, _f(m.group(1))])
+    if len(cb) == 3 and 98 <= sum(x[1] for x in cb) <= 102: rep["capBuckets"] = cb
+    m = re.search(r"Capitalisation moyenne \(M€\)\s+([\d\s]+,\d)", t); rep["capAvg"] = m.group(1).strip() + " M€" if m else None
+    m = re.search(r"Capitalisation médiane \(M€\)\s+([\d\s]+,\d)", t); rep["capMed"] = m.group(1).strip() + " M€" if m else None
+    rep = {k: v for k, v in rep.items() if v}
+    # géographie (colonne gauche) et secteurs (colonne droite) : libellé + valeur sur la même ligne
+    def column(lo, hi, vlo, vhi):
+        res = []
+        for w in words:
+            if vlo <= w["x0"] <= vhi and re.fullmatch(r"\d{1,2},\d%", w["text"]):
+                lab = " ".join(x["text"] for x in sorted(words, key=lambda x: x["x0"]) if lo <= x["x0"] < w["x0"] - 2 and abs(x["top"] - w["top"]) < 3 and not x["text"].endswith("%"))
+                if lab: res.append([lab, _f(w["text"].rstrip("%")), w["top"]])
+        res.sort(key=lambda r: r[2]); return [[a, b] for a, b, _ in res]
+    anchor = [w for w in words if w["text"] == "Répartition"]
+    if len(anchor) >= 2:
+        xs = sorted(a["x0"] for a in anchor); split = (xs[0] + xs[-1]) / 2 if xs[-1] - xs[0] > 100 else 300
+        geo = column(0, split, 0, split); sec = column(split, 9999, split, 9999)
+        if 97 <= sum(x[1] for x in geo) <= 103 and len(geo) >= 5: rep["geo"] = geo
+        if 97 <= sum(x[1] for x in sec) <= 103 and len(sec) >= 4: rep["sectors"] = sec
+    # performances (Fonds / Indice : 1M, YTD, 2025…2021, Création)
+    rows = re.findall(r"^(Fonds|Indice)\s+((?:-?\d+,\d%\s*){8})", t, re.M)
+    if len(rows) >= 2:
+        f, b = [x.replace("%", "") for x in rows[0][1].split()], [x.replace("%", "") for x in rows[1][1].split()]
+        gap = lambda a, c: ("%+.1f" % (_f(a) - _f(c))).replace(".", ",").replace("+", "+") + " pt"
+        fmt = lambda x: x + " %"
+        lab = ["1 mois", "Depuis le 1er janv.", "2025", "2024", "2023", "2022", "2021", "Depuis la création"]
+        cum = [0, 1, 7]; cal = [2, 3, 4, 5, 6]
+        mk = lambda ix: [[lab[i], fmt(f[i]), fmt(b[i]), gap(f[i], b[i])] for i in ix]
+        rep["tables"] = [{"title": "Performances cumulées", "cols": ["Fonds", "MSCI Europe Micro Caps NR", "Écart"], "rows": mk(cum), "note": "Objectif de gestion : 7 % annualisés."},
+                         {"title": "Performances calendaires", "cols": ["Fonds", "MSCI Europe Micro Caps NR", "Écart"], "rows": mk(cal[::-1])}]
+    if rep: out["report"] = rep
+    return out if len(out) > 2 else None
+
+def gaylussac_perf():
+    """Historique de VL de la part I (graphique amCharts de la page) vs objectif de gestion de 7 % annualisés."""
+    import datetime as dt
+    html = _gl_page()
+    scripts = [s for s in re.findall(r"<script[^>]*>(.*?)</script>", html, re.S) if GL_ISIN in s and "var data" in s]
+    if not scripts: raise ValueError("graphique Gay-Lussac introuvable")
+    blk = scripts[0].split("var data", 1)[1]
+    pts = re.findall(r"""["']?date["']?\s*:\s*["']([^"']+)["']\s*,\s*["']?value["']?\s*:\s*["']?(-?[\d.]+)""", blk)
+    if len(pts) < 100: raise ValueError("série trop courte")
+    def day(s):
+        s = s[:10]
+        try: return round(dt.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
+        except ValueError: return round(dt.datetime.strptime(s, "%d/%m/%Y").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
+    ser = [(day(d), float(v)) for d, v in pts]
+    ser = [x for i, x in enumerate(ser) if i == 0 or x[0] > ser[i - 1][0]]
+    fm = lambda v: ("%.1f" % v).replace(".", ",") + " %"
+    def build(ser, annual):
+        d0, v0 = ser[0]; step = max(1, len(ser) // 280)
+        sel = ser[::step] + ([ser[-1]] if (len(ser) - 1) % step else [])
+        P = [[d, round(100 * v / v0, 2), round(100 * 1.07 ** ((d - d0) / 365.25), 2)] for d, v in sel]
+        yrs = max((ser[-1][0] - d0) / 365.25, 0.1)
+        cum = ser[-1][1] / v0 * 100 - 100; ann = ((1 + cum / 100) ** (1 / yrs) - 1) * 100 if annual else cum
+        bc = P[-1][2] - 100; ba = 7.0 if annual else bc
+        iso = lambda d: dt.datetime.fromtimestamp(d * 86400, dt.timezone.utc).strftime("%Y-%m-%d")
+        return {"period": dt.datetime.fromtimestamp(d0 * 86400, dt.timezone.utc).strftime("%d/%m/%Y"),
+                "f": {"cum": fm(cum), "ann": fm(ann), "vl": ("%.2f" % ser[-1][1]).replace(".", ","), "from": iso(d0), "to": iso(ser[-1][0])},
+                "b": {"cum": fm(bc), "ann": fm(ba), "vl": "", "from": iso(d0), "to": iso(ser[-1][0])}, "p": P}
+    full = build(ser, True)
+    last = ser[-1][0]; y1s = [x for x in ser if x[0] >= last - 365]
+    out = {"all": full}
+    if len(y1s) >= 50: out["y1"] = build(y1s, False)
+    ytd0 = [x for x in ser if x[0] < round(dt.datetime(dt.datetime.fromtimestamp(last * 86400, dt.timezone.utc).year, 1, 1, tzinfo=dt.timezone.utc).timestamp() / 86400)]
+    if ytd0: out["all"]["f"]["ytd"] = fm(ser[-1][1] / ytd0[-1][1] * 100 - 100)
+    return {"id": "gaylussac", "perf": out}
+
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf, gaylussac, gaylussac_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
