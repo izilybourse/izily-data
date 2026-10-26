@@ -60,6 +60,110 @@ def _crop(page, x0, y0, x1, y1):
     w, h = page.width, page.height
     return (page.crop((x0 * w, y0 * h, x1 * w, y1 * h)).extract_text() or "")
 
+def _col(o):
+    c = o.get("non_stroking_color")
+    if c is None: return None
+    if isinstance(c, (int, float)): c = (c,)
+    try: return tuple(round(float(x), 2) for x in c)
+    except Exception: return None
+
+def _shapes(sub):
+    return [s for s in list(sub.rects) + list(sub.curves) if _col(s) is not None]
+
+def _lines(words, tol=2.5):
+    """Regroupe des mots en lignes (même hauteur)."""
+    out = []
+    for w in sorted(words, key=lambda w: (round(w["top"]), w["x0"])):
+        if out and abs(out[-1]["top"] - w["top"]) <= tol: out[-1]["w"].append(w)
+        else: out.append({"top": w["top"], "w": [w]})
+    res = []
+    for l in out:
+        ws = sorted(l["w"], key=lambda w: w["x0"])
+        res.append({"top": l["top"], "bottom": max(w["bottom"] for w in ws), "x0": ws[0]["x0"], "x1": ws[-1]["x1"], "text": " ".join(w["text"] for w in ws), "w": ws})
+    return res
+
+def _legend(sub, shapes, maxdim):
+    """Associe chaque petit carré de légende (couleur) au texte situé à sa droite."""
+    words, res = sub.extract_words(), {}
+    for s in shapes:
+        if max(s["width"], s["height"]) > maxdim: continue
+        cy = (s["top"] + s["bottom"]) / 2
+        ws = [w for w in words if w["x0"] >= s["x1"] - 1 and w["x0"] - s["x1"] < maxdim * 6 and abs((w["top"] + w["bottom"]) / 2 - cy) < max(s["height"], 6)]
+        if ws: res.setdefault(_col(s), " ".join(w["text"] for w in sorted(ws, key=lambda w: w["x0"])))
+    return res
+
+CANON = [("< 500 M€", "<500"), ("500 M€ – 1 Md€", "500m"), ("1 – 10 Mds€", "1-10"), ("> 10 Mds€", ">10")]
+def _canon(label):
+    k = re.sub(r"\s+", "", label).lower().replace("–", "-").replace("—", "-")
+    for out, key in CANON:
+        if k.startswith(key): return out
+    return None
+
+def iam_geo(page):
+    import math
+    w, h = page.width, page.height
+    sub = page.crop((0, .15 * h, .30 * w, .42 * h))
+    shapes = _shapes(sub); legend = _legend(sub, shapes, .025 * w)
+    wedges = [s for s in shapes if max(s["width"], s["height"]) > .025 * w and _col(s) in legend]
+    if not (3 <= len(wedges) <= 10): return None
+    x0 = min(s["x0"] for s in wedges); x1 = max(s["x1"] for s in wedges); t0 = min(s["top"] for s in wedges); t1 = max(s["bottom"] for s in wedges)
+    cx, cy = (x0 + x1) / 2, (t0 + t1) / 2
+    def ang(x, y): return math.atan2(-(y - cy), x - cx)
+    def wedge_angle(s):
+        pts = s.get("pts") or [(s["x0"], s["top"]), (s["x1"], s["bottom"])]
+        mx = sum(p[0] for p in pts) / len(pts); my = sum(p[1] for p in pts) / len(pts)
+        return ang(mx, my)
+    labels = []
+    for wd in sub.extract_words():
+        m = re.match(r"^(\d{1,2},\d)\s*%?$", wd["text"])
+        if m: labels.append((_f(m.group(1)), ang((wd["x0"] + wd["x1"]) / 2, (wd["top"] + wd["bottom"]) / 2)))
+    if len(labels) != len(wedges): return None
+    pairs = sorted(((abs(math.remainder(wedge_angle(s) - la, 2 * math.pi)), i, j) for i, s in enumerate(wedges) for j, (_, la) in enumerate(labels)))
+    ui, uj, out = set(), set(), []
+    for d, i, j in pairs:
+        if i in ui or j in uj: continue
+        ui.add(i); uj.add(j); out.append((legend[_col(wedges[i])], labels[j][0]))
+    if len(out) != len(wedges) or not (99 <= sum(p for _, p in out) <= 101): return None
+    small = sorted((x for x in shapes if max(x["width"], x["height"]) <= .025 * w and _col(x) in legend), key=lambda x: x["top"])
+    order = {legend[_col(x)]: k for k, x in enumerate(small)}
+    return sorted(([n.strip(), p] for n, p in out), key=lambda r: order.get(r[0], 99))
+
+def iam_capbuckets(page):
+    w, h = page.width, page.height
+    sub = page.crop((0, .43 * h, .42 * w, .64 * h))
+    shapes = _shapes(sub); legend = _legend(sub, shapes, .02 * w)
+    segs = sorted((s for s in shapes if s["height"] > .03 * h and s["width"] > .003 * w), key=lambda s: s["x0"])
+    if not (2 <= len(segs) <= 4): return None
+    tot = sum(s["width"] for s in segs); words = sub.extract_words(); vals = {}
+    for s in segs:
+        lab = _canon(legend.get(_col(s), ""))
+        if not lab: return None
+        v = round(s["width"] / tot * 100, 1)
+        for wd in words:
+            m = re.match(r"^(\d{1,2},\d)\s*%?$", wd["text"]); xm = (wd["x0"] + wd["x1"]) / 2
+            if m and s["x0"] - 1 <= xm <= s["x1"] + 1 and abs(_f(m.group(1)) - v) <= 1.0: v = _f(m.group(1))
+        vals[lab] = v
+    res = [[lab, vals.get(lab, 0)] for lab, _ in CANON]
+    return res if 99 <= sum(v for _, v in res) <= 101 else None
+
+ACR = {"asr": "ASR", "iss": "ISS", "sbm": "SBM", "scor": "SCOR", "dof": "DOF", "ssab": "SSAB", "caf": "CAF", "ksb": "KSB", "se": "SE", "ab": "AB"}
+def _fixname(n): return " ".join(ACR.get(t.lower(), t) for t in n.split())
+
+def iam_caps(page):
+    w, h = page.width, page.height
+    sub = page.crop((.74 * w, .04 * h, w, h))
+    blocks = sorted((s for s in _shapes(sub) if s["height"] > .04 * h and s["width"] < .14 * w), key=lambda s: s["top"])
+    if not (2 <= len(blocks) <= 4): return None
+    right = max(b["x1"] for b in blocks); words = sub.extract_words(); out = []
+    for b in blocks:
+        lab = _canon(" ".join(wd["text"] for wd in words if b["x0"] <= wd["x0"] and wd["x1"] <= b["x1"] + 1 and b["top"] <= wd["top"] <= b["bottom"]))
+        names = [_fixname(l["text"].strip()) for l in _lines([wd for wd in words if wd["x0"] >= right - 1 and b["top"] <= (wd["top"] + wd["bottom"]) / 2 <= b["bottom"]])]
+        if not lab or not names: return None
+        out.append([lab, names])
+    n = sum(len(x[1]) for x in out)
+    return out if 5 <= n <= 150 else None
+
+
 def iam_report(page):
     """Relit les blocs de la page 2 du reporting. Chaque bloc est validé séparément :
     un bloc illisible est omis (le widget garde alors ses chiffres précédents et l'indique)."""
@@ -104,6 +208,11 @@ def iam_report(page):
                 v = int(m.group(1).replace(" ", ""))
                 if 300 <= v <= 200000: out[key] = f"{v:,}".replace(",", " ") + " M€"
     except Exception as e: print("rapport : capitalisations", e, file=sys.stderr)
+    for key, fn in (("geo", iam_geo), ("capBuckets", iam_capbuckets), ("caps", iam_caps)):
+        try:
+            v = fn(page)
+            if v: out[key] = v
+        except Exception as e: print("rapport :", key, e, file=sys.stderr)
     if out:
         mois = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"]
         m = re.search(r"RAPPORT\s+([A-ZÉÛ]+)\s+(\d{4})", full)
