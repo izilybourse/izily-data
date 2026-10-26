@@ -11,7 +11,7 @@ import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "amiral": "",
+    "comgest": "",
 }
 
 def get(url):
@@ -581,9 +581,109 @@ def gaylussac_perf():
     return {"id": "gaylussac", "perf": out}
 
 
+# ---------------------------------------------------------------- Amiral Gestion (Sextant PME, part A)
+SX_PAGE = "https://www.amiralgestion.com/fr/sextant-pme"
+SX_ISIN = "FR0010547869"
+SX_API = "https://amiral.dev.calcifer.nx.digital/api/data/public/"   # source utilisée par le site lui-même (courbe de VL)
+
+def _sx_page():
+    return urllib.request.urlopen(urllib.request.Request(SX_PAGE, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124 Safari/537.36"}), timeout=60).read().decode("utf8", "ignore")
+
+def sextant():
+    """Reporting mensuel PDF de Sextant PME (part A) : KPI, 5 premières lignes, allocations, performances, contributeurs."""
+    import pdfplumber
+    html = _sx_page().replace("\\/", "/")
+    m = re.search(r'https://api\.amiralgestion\.com/documents/permalink/\d+/[^"\'<>\s]*?\.pdf[^"\'<>\s]*', html)
+    links = re.findall(r'href=["\'](https://api\.amiralgestion\.com/documents/permalink/\d+/doc\.pdf)["\'][^>]*>\s*(?:<[^>]+>\s*)*Sextant PME - A - Mensuel', html, re.I)
+    if not links: raise ValueError("lien du reporting mensuel introuvable")
+    with pdfplumber.open(io.BytesIO(get(links[0]))) as pdf:
+        p1, p2 = pdf.pages[0], pdf.pages[1]
+        t1, t2 = p1.extract_text() or "", p2.extract_text() or ""
+        w2 = p2.extract_words()
+    out = {"id": "amiral", "url": SX_PAGE}; rep = {}
+    num = lambda s: _f(s.replace(" ", ""))
+    m = re.search(r"Actif net\s+([\d.]+)\s*M€", t1)
+    if m: out["aum"] = m.group(1).replace(".", ",") + " M€"
+    m = re.search(r"Nombre de lignes\s+(\d{2,3})", t1)
+    if m: out["nbHoldings"] = int(m.group(1))
+    m = re.search(r"Rapport Mensuel\s*/\s*([A-Za-zéûÉ]+)\s+(\d{4})", t1 + "\n" + t2)
+    mois = {"janvier": "01", "février": "02", "mars": "03", "avril": "04", "mai": "05", "juin": "06", "juillet": "07", "août": "08", "septembre": "09", "octobre": "10", "novembre": "11", "décembre": "12"}
+    if m and m.group(1).lower() in mois:
+        import calendar
+        mo, yr = int(mois[m.group(1).lower()]), int(m.group(2))
+        out["asOf"] = f"{calendar.monthrange(yr, mo)[1]:02d}/{mo:02d}/{yr}"; rep["asOf"] = m.group(1).lower() + " " + m.group(2)
+    m = re.search(r"Capitalisation moyenne des actions\s+([\d.]+)\s*Md€", t1); rep["capAvg"] = m.group(1).replace(".", ",") + " Md€" if m else None
+    m = re.search(r"Capitalisation médiane des actions\s+([\d.]+)\s*Md€", t1); rep["capMed"] = m.group(1).replace(".", ",") + " Md€" if m else None
+    # cinq premières lignes : « Nom Actions Secteur Pays Note %»
+    rows = re.findall(r"^(.+?)\s+Actions\s+.+?\s+\d\.\d\s+(\d{1,2}\.\d)%\s*$", t2, re.M)
+    hold = [{"name": n.strip(), "ticker": "", "pct": num(p)} for n, p in rows][:5]
+    if len(hold) == 5: out["holdings"] = hold
+    for lab, key in (("10 premières", "top10"),):
+        mm = re.search(lab + r"\s+lignes\s+(\d{2}\.\d)%", t2)
+        if mm: out[key] = num(mm.group(1))
+    # allocations : mots positionnés (colonnes : classes d'actifs x<200, secteurs 200-410, pays >410)
+    def column(x0, x1, vx0, vx1):
+        res = []
+        for w in w2:
+            if vx0 <= w["x0"] <= vx1 and re.fullmatch(r"\d{1,2}\.\d%", w["text"]):
+                lab = " ".join(x["text"] for x in sorted(w2, key=lambda x: (round(x["top"]), x["x0"])) if x0 <= x["x0"] < w["x0"] - 2 and -4 < w["top"] - x["top"] < 22 and not re.search(r"%|bps", x["text"]))
+                if lab: res.append([lab, num(w["text"].rstrip("%")), w["top"]])
+        res.sort(key=lambda r: r[2]); return [[a, b] for a, b, _ in res]
+    sec = column(200, 410, 200, 410); geo = column(410, 9999, 410, 9999)
+    if 97 <= sum(x[1] for x in sec) <= 103 and len(sec) >= 5: rep["sectors"] = sec
+    if 97 <= sum(x[1] for x in geo) <= 103 and len(geo) >= 5: rep["geo"] = geo
+    mc = {"Jusqu'à 500 M€": r"<=500M€\s+(\d{1,2}\.\d)%", "500 M€ – 2 Md€": r"500M€ - 2Md€\s+(\d{1,2}\.\d)%", "> 2 Md€": r">2Md€\s+(\d{1,2}\.\d)%", "Liquidités": r"Liquidités\s+(\d{1,2}\.\d)%"}
+    cb = [[k, num(re.search(v, t2).group(1))] for k, v in mc.items() if re.search(v, t2)]
+    if len(cb) >= 3 and 97 <= sum(x[1] for x in cb) <= 103: rep["capBuckets"] = cb
+    # performances cumulées
+    lab = ["1 mois", "Depuis le 1er janv.", "1 an", "3 ans", "5 ans", "10 ans", "Depuis la création"]
+    pr = re.findall(r"^(Fonds|Indice de référence)\s+((?:-?\d+\.\d%\s*){7,11})", t1, re.M)
+    if len(pr) >= 2:
+        f = [x.rstrip("%") for x in pr[0][1].split()]; b = [x.rstrip("%") for x in pr[1][1].split()]
+        if len(f) >= 7 and len(b) >= 7:
+            fm = lambda x: x.replace(".", ",") + " %"
+            gap = lambda a, c: ("%+.1f" % (num(a) - num(c))).replace(".", ",") + " pt" + ("s" if abs(num(a) - num(c)) >= 2 else "")
+            rep["tables"] = [{"title": "Performances cumulées", "cols": ["Fonds", "MSCI EMU Micro NR", "Écart"], "rows": [[lab[i], fm(f[i]), fm(b[i]), gap(f[i], b[i])] for i in range(7)],
+                              "note": "Le 1er juin 2021, l'indice de référence a été modifié (auparavant CAC Small NR)."}]
+    # contributeurs : « Optima Bank 29bps »
+    best = re.findall(r"^(.+?)\s+(\d{2,3})bps\s+(.+?)\s+(-\d{2,3})bps\s*$", t1, re.M)
+    if len(best) >= 5:
+        rep["moves"] = {"title": "Contributeurs du mois", "best": [[a.strip(), round(int(b) / 100, 2)] for a, b, _, _ in best[:5]], "worst": [[c.strip(), round(int(d) / 100, 2)] for _, _, c, d in best[:5]]}
+    rep = {k: v for k, v in rep.items() if v}
+    if rep: out["report"] = rep
+    return out if len(out) > 2 else None
+
+def sextant_perf():
+    """Historique de VL de la part A (CSV du site) + performances comparées à l'indice (perf.json du site)."""
+    import datetime as dt, csv
+    q = f"fund_id=sextant_pme&share_id={SX_ISIN}"
+    rows = list(csv.reader(io.StringIO(get(SX_API + "histo.csv?" + q).decode("utf8"))))[1:]
+    day = lambda s: round(dt.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
+    ser = [(day(r[0]), float(r[3])) for r in rows if len(r) >= 4 and r[3]]
+    if len(ser) < 200: raise ValueError("historique de VL trop court")
+    pj = json.loads(get(SX_API + "perf.json?" + q).decode("utf8"))
+    P = {p["period"]: p for p in pj.get("performances", [])}
+    fm = lambda v: ("%.1f" % (v * 100)).replace(".", ",") + " %"
+    iso = lambda d: dt.datetime.fromtimestamp(d * 86400, dt.timezone.utc).strftime("%Y-%m-%d")
+    def build(ser, key):
+        step = max(1, len(ser) // 300); sel = ser[::step] + ([ser[-1]] if (len(ser) - 1) % step else [])
+        v0 = ser[0][1]; p = P.get(key, {})
+        g = lambda k: fm(p[k]) if p.get(k) is not None else ""
+        blk = lambda a, b: {"cum": g(a), "ann": g(b), "vl": "", "from": iso(ser[0][0]), "to": iso(ser[-1][0])}
+        f = blk("fund", "annualized_fund"); f["vl"] = ("%.2f" % ser[-1][1]).replace(".", ",")
+        return {"period": dt.datetime.fromtimestamp(ser[0][0] * 86400, dt.timezone.utc).strftime("%d/%m/%Y"), "f": f, "b": blk("benchmark", "annualized_benchmark"), "p": [[d, round(100 * v / v0, 2)] for d, v in sel]}
+    full = build(ser, "Inception"); last = ser[-1][0]
+    out = {"all": full}
+    y1 = [x for x in ser if x[0] >= last - 365]
+    if len(y1) >= 50: out["y1"] = build(y1, "1Y")
+    if "YTD" in P:
+        full["f"]["ytd"] = fm(P["YTD"]["fund"]); full["b"]["ytd"] = fm(P["YTD"]["benchmark"])
+    return {"id": "amiral", "perf": out}
+
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf, gaylussac, gaylussac_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf, gaylussac, gaylussac_perf, sextant, sextant_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
