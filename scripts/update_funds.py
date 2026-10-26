@@ -11,7 +11,7 @@ import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "hmg": "", "sunny": "", "gaylussac": "", "amiral": "",
+    "comgest": "", "hmg": "", "gaylussac": "", "amiral": "",
 }
 
 def get(url):
@@ -293,9 +293,110 @@ def independance_perf(cfg):
         except Exception as e: print("independance perf", cfg["id"], key, ":", e, file=sys.stderr)
     return {"id": cfg["id"], "perf": out} if out else None
 
+
+# ---------------------------------------------------------------- Sunny AM (Sunny Managers, part I)
+SUNNY_PAGE = "https://www.sunny-am.com/fonds/sunny-managers"
+SUNNY_ISIN = "FR0013284544"
+
+def _sunny_html():
+    return get(SUNNY_PAGE).decode("utf8", "ignore")
+
+def _sunny_block(html, marker):
+    """Script inline contenant les données d'un graphique du fonds."""
+    for blk in re.split(r"<script", html):
+        if marker in blk: return blk
+    return ""
+
+def _sunny_arr(blk, name):
+    m = re.search(r"(?:const|var|let)\s+" + name + r"\s*=\s*\[(.*?)\]", blk, re.S)
+    return [float(x) for x in re.findall(r'"(-?\d+(?:\.\d+)?)"', m.group(1))] if m else []
+
+def sunny_perf():
+    import datetime as dt
+    html = _sunny_html()
+    vl = _sunny_block(html, "chart-vl-" + SUNNY_ISIN)
+    m = re.search(r"chart-vl-" + SUNNY_ISIN + r"'.*?labels:\s*\[(.*?)\]", vl, re.S)
+    days = [round(dt.datetime(int(y), int(mo), int(d)).replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
+            for d, mo, y in re.findall(r'"(\d{2})\\?/(\d{2})\\?/(\d{4})"', m.group(1))] if m else []
+    blk = _sunny_block(html, "'chart-perf-btd-" + SUNNY_ISIN + "'")
+    f, b = _sunny_arr(blk, "VLbtd_data"), _sunny_arr(blk, "VLbtdIND_data")
+    if not (len(days) == len(f) == len(b) >= 200): raise ValueError("séries Sunny illisibles")
+    if any(days[i] >= days[i + 1] for i in range(len(days) - 1)): raise ValueError("dates non croissantes")
+    def dec(pts, n):
+        if len(pts) <= n: return pts
+        st = len(pts) / n; return [pts[int(k * st)] for k in range(n)] + [pts[-1]]
+    allp = [[d, round(x, 2), round(y, 2)] for d, x, y in zip(days, f, b)]
+    f1, b1 = _sunny_arr(blk, "VLp1an_data"), _sunny_arr(blk, "VLp1anIND_data")
+    y1 = []
+    if f1 and len(f1) == len(b1) <= len(days):
+        d1 = days[-len(f1):]; y1 = [[d, round(x / f1[0] * 100, 2), round(y / b1[0] * 100, 2)] for d, x, y in zip(d1, f1, b1)]
+    fm = lambda v: ("%.2f" % v).replace(".", ",") + " %"
+    yrs = max((days[-1] - days[0]) / 365.25, 0.1)
+    ann = lambda c: ((1 + c / 100) ** (1 / yrs) - 1) * 100
+    cf, cb = f[-1] - 100, b[-1] - 100
+    iso = lambda d: dt.datetime.fromtimestamp(d * 86400, dt.timezone.utc).strftime("%Y-%m-%d")
+    out = {"all": {"period": "origine", "f": {"cum": fm(cf), "ann": fm(ann(cf)), "vl": "", "from": iso(days[0]), "to": iso(days[-1])},
+                   "b": {"cum": fm(cb), "ann": fm(ann(cb)), "vl": "", "from": iso(days[0]), "to": iso(days[-1])}, "p": dec(allp, 330)}}
+    ye, yb = _sunny_arr(blk, "VLeytd_data"), _sunny_arr(blk, "VLeytdIND_data")
+    if ye and yb:
+        out["all"]["f"]["ytd"] = fm(ye[-1] / ye[0] * 100 - 100); out["all"]["b"]["ytd"] = fm(yb[-1] / yb[0] * 100 - 100)
+    if y1:
+        c1, c2 = y1[-1][1] - 100, y1[-1][2] - 100
+        out["y1"] = {"period": "1 an", "f": {"cum": fm(c1), "ann": fm(c1), "vl": "", "from": iso(y1[0][0]), "to": iso(y1[-1][0])},
+                     "b": {"cum": fm(c2), "ann": fm(c2), "vl": "", "from": iso(y1[0][0]), "to": iso(y1[-1][0])}, "p": dec(y1, 250)}
+    return {"id": "sunny", "perf": out}
+
+def sunny():
+    """Dernier reporting mensuel 'Sunny Managers – part I' : KPI, top 10, secteurs, performances."""
+    import pdfplumber
+    html = _sunny_html()
+    links = re.findall(r'href=["\']([^"\']*Reporting/SUNNY(?:%20| )MANAGERS(?:%20| )-(?:%20| )PART(?:%20| )I(?:%20| )-(?:%20| )' + SUNNY_ISIN + r'[^"\']*\.pdf)', html, re.I)
+    if not links: return None
+    url = max(links, key=lambda u: re.findall(r"(\d{2}-\d{2}-\d{2})\.pdf", u)[-1:] or [""])
+    if url.startswith("/"): url = "https://www.sunny-am.com" + url
+    with pdfplumber.open(io.BytesIO(get(url.replace(" ", "%20")))) as pdf:
+        p1, p2 = pdf.pages[0], pdf.pages[1]
+        t1, t2 = p1.extract_text() or "", p2.extract_text() or ""
+        words2 = p2.extract_words()
+    out = {"id": "sunny"}
+    m = re.search(r"AUM\s+(\d[\d\s,]*)\s*M€", t1)
+    if m: out["aum"] = m.group(1).strip() + " M€"
+    m = re.search(r"Nombre de titres en portefeuille\s+(\d{2,3})", t1)
+    if m: out["nbHoldings"] = int(m.group(1))
+    m = re.search(r"Poids top 10\s+(\d{2},\d{1,2})\s*%", t1)
+    if m: out["top10"] = _f(m.group(1))
+    m = re.search(r"Rapport Mensuel\s*-\s*([a-zéû]+)\s+(\d{4})", t2, re.I)
+    mois = {"janvier": "01", "février": "02", "mars": "03", "avril": "04", "mai": "05", "juin": "06", "juillet": "07", "août": "08", "septembre": "09", "octobre": "10", "novembre": "11", "décembre": "12"}
+    rep = {}
+    if m and m.group(1).lower() in mois:
+        import calendar
+        mo, yr = int(mois[m.group(1).lower()]), int(m.group(2))
+        out["asOf"] = f"{calendar.monthrange(yr, mo)[1]:02d}/{mo:02d}/{yr}"; rep["asOf"] = m.group(1).lower() + " " + m.group(2)
+    sec = t2.split("Principales positions", 1)[-1]
+    rows = re.findall(r"^([A-Z0-9&.'\- ]{3,40}?)\s+(\d{1,2},\d{2})%\s*$", sec, re.M)
+    hold = [{"name": _fixname(n.strip().title()), "ticker": "", "pct": _f(p)} for n, p in rows][:10]
+    tot = sum(h["pct"] for h in hold)
+    if 8 <= len(hold) <= 10 and 20 <= tot <= 60: out["holdings"] = hold; out["holdingsLabel"] = "Top 10 (reporting mensuel, part I)"
+    # secteurs : valeurs (x croissant) <-> libellés (x croissant)
+    vals = sorted([w for w in words2 if re.fullmatch(r"\d{1,2},\d%", w["text"]) and w["top"] < 340 and w["x0"] > 270], key=lambda w: w["x0"])
+    labs = sorted([w for w in words2 if w["x0"] > 200 and w["top"] > 285 and w["top"] < 345 and re.search(r"[A-Za-zéÉ]", w["text"]) and not w["text"].endswith("%")], key=lambda w: w["x0"])
+    if len(vals) >= 5 and len(vals) == len(labs):
+        sectors = [[l["text"], _f(v["text"].rstrip("%"))] for l, v in zip(labs, vals)]
+        if 97 <= sum(x[1] for x in sectors) <= 103: rep["sectors"] = sectors
+    mm = re.search(r"France\s+(\d{2,3},\d)\s*%", t2) or re.search(r"(\d{2,3},\d)%\s*France", t2)
+    if mm and abs(_f(mm.group(1)) - 100) < 0.5: rep["geo"] = [["France", 100.0]]
+    # performances cumulées
+    prow = re.findall(r"^(YTD|1 mois|3 mois|6 mois|1 an|3 ans|5 ans|Origine)\s+(-?\d+,\d+)%\s+(-?\d+,\d+)%\s+(-?\d+,\d+)%", t1, re.M)
+    if len(prow) == 8:
+        lab = {"YTD": "Depuis le 1er janv.", "Origine": "Depuis la création"}
+        rep["tables"] = [{"title": "Performances cumulées", "cols": ["Fonds", "Indice", "Écart"], "rows": [[lab.get(a, a)] + [x.replace("%", " %") for x in (b, c, d)] for a, b, c, d in prow],
+                          "note": "Indice : Bloomberg France Mid 60+ Net Return depuis le 03/10/2025 ; auparavant CAC Mid & Small (dividendes réinvestis)."}]
+    if rep: out["report"] = rep
+    return out if len(out) > 1 else None
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
