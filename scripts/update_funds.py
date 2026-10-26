@@ -540,8 +540,8 @@ def gaylussac():
         lab = ["1 mois", "Depuis le 1er janv.", "2025", "2024", "2023", "2022", "2021", "Depuis la création"]
         cum = [0, 1, 7]; cal = [2, 3, 4, 5, 6]
         mk = lambda ix: [[lab[i], fmt(f[i]), fmt(b[i]), gap(f[i], b[i])] for i in ix]
-        rep["tables"] = [{"title": "Performances cumulées", "cols": ["Fonds", "MSCI Europe Micro Caps NR", "Écart"], "rows": mk(cum), "note": "Objectif de gestion : 7 % annualisés."},
-                         {"title": "Performances calendaires", "cols": ["Fonds", "MSCI Europe Micro Caps NR", "Écart"], "rows": mk(cal[::-1])}]
+        rep["tables"] = [{"title": "Performances cumulées", "cols": ["Fonds", "Indice", "Écart"], "rows": mk(cum), "note": "Indice : MSCI Europe Micro Caps NR. Objectif de gestion : 7 % annualisés."},
+                         {"title": "Performances calendaires", "cols": ["Fonds", "Indice", "Écart"], "rows": mk(cal[::-1])}]
     if rep: out["report"] = rep
     return out if len(out) > 2 else None
 
