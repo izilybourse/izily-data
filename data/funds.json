@@ -1,1 +1,60 @@
-{"funds": []}
+{
+ "generatedAt": "2026-10-26T07:26:07.068091Z",
+ "funds": [
+  {
+   "id": "independance-am",
+   "holdings": [
+    {
+     "name": "YTD",
+     "ticker": "",
+     "pct": 11.3
+    },
+    {
+     "name": "Ind. Europe Mid - I",
+     "ticker": "",
+     "pct": 11.3
+    },
+    {
+     "name": "L'équipe d'investissement YTD",
+     "ticker": "",
+     "pct": 11.3
+    },
+    {
+     "name": "mois",
+     "ticker": "",
+     "pct": 11.4
+    },
+    {
+     "name": "an",
+     "ticker": "",
+     "pct": 17.8
+    },
+    {
+     "name": "Ind. Europe Mid - I",
+     "ticker": "",
+     "pct": 13.4
+    },
+    {
+     "name": "Tracking Error",
+     "ticker": "",
+     "pct": 6.1
+    },
+    {
+     "name": "Biens d'équipement",
+     "ticker": "",
+     "pct": 17.7
+    },
+    {
+     "name": "Financières",
+     "ticker": "",
+     "pct": 11.9
+    },
+    {
+     "name": "Services aux Indra Sistemas",
+     "ticker": "",
+     "pct": 7.2
+    }
+   ]
+  }
+ ]
+}
