@@ -146,7 +146,7 @@ def iam_capbuckets(page):
     res = [[lab, vals.get(lab, 0)] for lab, _ in CANON]
     return res if 99 <= sum(v for _, v in res) <= 101 else None
 
-ACR = {"asr": "ASR", "iss": "ISS", "sbm": "SBM", "scor": "SCOR", "dof": "DOF", "ssab": "SSAB", "caf": "CAF", "ksb": "KSB", "se": "SE", "ab": "AB"}
+ACR = {"ldc": "LDC", "tp": "TP", "nrj": "NRJ", "crit": "CRIT", "smcp": "SMCP", "gl": "GL", "icop": "ICOP", "nv": "NV", "ag": "AG", "asr": "ASR", "iss": "ISS", "sbm": "SBM", "scor": "SCOR", "dof": "DOF", "ssab": "SSAB", "caf": "CAF", "ksb": "KSB", "se": "SE", "ab": "AB"}
 def _fixname(n): return " ".join(ACR.get(t.lower(), t) for t in n.split())
 
 def iam_caps(page):
@@ -164,7 +164,7 @@ def iam_caps(page):
     return out if 5 <= n <= 150 else None
 
 
-def iam_report(page):
+def iam_report(page, label="Europe Mid"):
     """Relit les blocs de la page 2 du reporting. Chaque bloc est validé séparément :
     un bloc illisible est omis (le widget garde alors ses chiffres précédents et l'indique)."""
     out, full = {}, (page.extract_text() or "")
@@ -192,8 +192,8 @@ def iam_report(page):
         def row(label, rx):
             m = re.search(rx + r"\D{0,3}?" + num + r" " + num + r" " + num + r"\s*%", flat, re.I)
             return [label, m.group(1), m.group(2), m.group(3) + " %"] if m else None
-        a = row("Europe Mid – médiane", r"m[ée]diane")
-        b = row("Europe Mid – moyenne pondérée", r"pond[ée]r[ée]e")
+        a = row(label + " – médiane", r"m[ée]diane")
+        b = row(label + " – moyenne pondérée", r"pond[ée]r[ée]e")
         c = row("Benchmark", r"Benchmark")
         g = re.search(r"cart[^\d-]*(-?\d+,\d)\s*%\s*(-?\d+,\d)\s*%\s*(\d+)\s*pts", flat, re.I)
         if a and b and c:
@@ -220,13 +220,22 @@ def iam_report(page):
     return out or None
 
 
-IAM_PAGE = "https://www.independance-am.com/nos-fonds/independance-europe-mid/"
+IAM_AJAX = "https://www.independance-am.com/wp-admin/admin-ajax.php"
+# Les trois fonds d'Indépendance AM : page du fonds, mot-clé du PDF mensuel, identifiants du graphique (fonds / indice)
+IAM_FUNDS = [
+    {"id": "independance-am", "label": "Europe Mid", "page": "https://www.independance-am.com/nos-fonds/independance-europe-mid/",
+     "slug": "europe-mid", "f1": "ie-europe-mid-i", "f2": "stoxx-europe-mid"},
+    {"id": "independance-europe-small", "label": "Europe Small", "page": "https://www.independance-am.com/nos-fonds/europe-small/",
+     "slug": "europe-small", "f1": "ie-europe-i", "f2": "stoxx-europe"},
+    {"id": "independance-france-small-mid", "label": "France Small & Mid", "page": "https://www.independance-am.com/nos-fonds/france-small/",
+     "slug": "france-small-mid", "f1": "ie-x", "f2": "cac-midsmall-nr"},
+]
 
-def independance():
-    """Retrouve seul le dernier reporting mensuel 'Europe Mid' sur la page du fonds, puis lit son top 10."""
+def independance(cfg):
+    """Retrouve seul le dernier reporting mensuel du fonds sur sa page, puis lit son top 10 et son reporting détaillé."""
     import pdfplumber
-    html = get(IAM_PAGE).decode("utf8", "ignore")
-    links = re.findall(r'href=["\']([^"\']*/wp-content/uploads/(\d{4})/(\d{2})/([^"\'/]*reporting[^"\'/]*europe-mid[^"\'/]*\.pdf))', html, re.I)
+    html = get(cfg["page"]).decode("utf8", "ignore")
+    links = re.findall(r'href=["\']([^"\']*/wp-content/uploads/(\d{4})/(\d{2})/([^"\'/]*reporting[^"\'/]*' + re.escape(cfg["slug"]) + r'[^"\'/]*\.pdf))', html, re.I)
     if not links: return None
     def key(l):
         m = re.match(r"(\d{6,8})", l[3]); return (l[1], l[2], m.group(1)[-6:] if m else "")
@@ -234,51 +243,59 @@ def independance():
     with pdfplumber.open(io.BytesIO(get(url))) as pdf:
         text = "\n".join(p.extract_text() or "" for p in pdf.pages[:3])
         rep_page = next((pg for pg in pdf.pages[:3] if "Principaux investissements" in (pg.extract_text() or "")), None)
-        report = iam_report(rep_page) if rep_page else None
+        report = iam_report(rep_page, cfg["label"]) if rep_page else None
     sec = text.split("Principaux investissements", 1)[-1][:900]
     rows = re.findall(r"([A-Za-zÀ-ÿ&.' \-]{2,40}?)\s+(\d{1,2},\d)\s*%", sec)
-    hold = [{"name": n.strip(), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
+    hold = [{"name": _fixname(n.strip()), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
     tot = sum(h["pct"] for h in hold)
-    if not (8 <= len(hold) <= 10 and 20 <= tot <= 45 and all(0 < h["pct"] < 15 for h in hold)):
-        print("independance : top 10 illisible, données intégrées conservées", file=sys.stderr); return None
-    out = {"id": "independance-am", "holdings": hold, "top10": round(tot, 1), "holdingsLabel": "Top 10 (reporting mensuel, part I)"}
-    m = re.search(r"(\d[\d\s]{0,6})\s*M\s*€", text);   out["aum"] = m.group(1).strip() + " M€" if m else None
-    m = re.search(r"(\d{2,3})\s*titres", text, re.I);      out["nbHoldings"] = int(m.group(1)) if m else None
-    d = re.match(r"(\d{2})(\d{2})(\d{2})", name.replace("20251031", "251031"))
+    out = {"id": cfg["id"]}
+    if 8 <= len(hold) <= 10 and 20 <= tot <= 45 and all(0 < h["pct"] < 15 for h in hold):
+        out.update({"holdings": hold, "top10": round(tot, 1), "holdingsLabel": "Top 10 (reporting mensuel)"})
+    else:
+        print(cfg["id"], ": top 10 illisible, données intégrées conservées", file=sys.stderr)
+    m = re.search(r"Actif[^\n]{0,40}?(\d[\d\s]{0,7})\s*M\s*€", text, re.I)
+    if m: out["aum"] = re.sub(r"\s+", " ", m.group(1).strip()) + " M€"
+    m = re.search(r"(\d{2,3})\s*(?:titres|lignes)", text, re.I) or re.search(r"Nombre de titres\D{0,15}(\d{2,3})", text, re.I)
+    if m: out["nbHoldings"] = int(m.group(1))
+    d = re.match(r"(\d{2})(\d{2})(\d{2})", name)
     if d: out["asOf"] = f"{d.group(3)}/{d.group(2)}/20{d.group(1)}"
     if report: out["report"] = report
-    return {k: v for k, v in out.items() if v is not None}
+    return out if len(out) > 1 else None
 
-IAM_AJAX = "https://www.independance-am.com/wp-admin/admin-ajax.php"
-
-def _iam_chart(date_filter):
+def _iam_chart(cfg, date_filter):
     """Série 'base 100' du fonds et de son indice, telle qu'affichée sur la page du fonds (même appel que le site)."""
     import urllib.parse
-    body = urllib.parse.urlencode({"action": "load_chart", "fund_1": "ie-europe-mid-i", "fund_2": "stoxx-europe-mid", "date_filter": date_filter}).encode()
+    body = urllib.parse.urlencode({"action": "load_chart", "fund_1": cfg["f1"], "fund_2": cfg["f2"], "date_filter": date_filter}).encode()
     req = urllib.request.Request(IAM_AJAX, data=body, headers={
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://www.independance-am.com", "Referer": IAM_PAGE, "Accept": "application/json, text/javascript, */*; q=0.01"})
+        "Origin": "https://www.independance-am.com", "Referer": cfg["page"], "Accept": "application/json, text/javascript, */*; q=0.01"})
     j = json.loads(urllib.request.urlopen(req, timeout=60).read().decode("utf8"))
     if not j.get("success"): raise ValueError("réponse négative du site")
-    d = j["data"]; st = json.loads(d["stats"]); a, b = st["ie-europe-mid-i"], st["stoxx-europe-mid"]
+    d = j["data"]; st = json.loads(d["stats"]); a, b = st[cfg["f1"]], st[cfg["f2"]]
     if len(a) != len(b) or len(a) < 100: raise ValueError("série trop courte")
     pts = [[round(x[0] / 86400000), x[1], y[1]] for x, y in zip(a, b)]
     if any(pts[i][0] >= pts[i + 1][0] for i in range(len(pts) - 1)): raise ValueError("dates non croissantes")
-    if not all(30 < v < 1000 for q in pts for v in q[1:]): raise ValueError("valeurs aberrantes")
-    def pk(x): return {"cum": re.sub(r"(&nbsp;|\xa0)", " ", x["cumulativePerformance"]), "ann": re.sub(r"(&nbsp;|\xa0)", " ", x["annualizedPerformance"]), "vl": x["vl"], "from": x["fromDate"], "to": x["toDate"]}
+    if not all(20 < v < 30000 for q in pts for v in q[1:]): raise ValueError("valeurs aberrantes")
+    if len(pts) > 600:  # historique long : on allège (le dernier point est toujours conservé)
+        step = len(pts) / 330; pts = [pts[int(k * step)] for k in range(330)] + [pts[-1]]
+    nb = lambda t: re.sub(r"(&nbsp;|\xa0)", " ", str(t))
+    def pk(x):
+        o = {"cum": nb(x["cumulativePerformance"]), "ann": nb(x["annualizedPerformance"]), "vl": x["vl"], "from": x["fromDate"], "to": x["toDate"]}
+        if x.get("YTDPerformance"): o["ytd"] = nb(x["YTDPerformance"])
+        return o
     return {"period": d.get("period"), "f": pk(d["array_stats"]["fund1"]), "b": pk(d["array_stats"]["fund2"]), "p": pts}
 
-def independance_perf():
+def independance_perf(cfg):
     out = {}
     for key, flt in (("all", "all"), ("y1", "1")):
-        try: out[key] = _iam_chart(flt)
-        except Exception as e: print("independance perf", key, ":", e, file=sys.stderr)
-    return {"id": "independance-am", "perf": out} if out else None
+        try: out[key] = _iam_chart(cfg, flt)
+        except Exception as e: print("independance perf", cfg["id"], key, ":", e, file=sys.stderr)
+    return {"id": cfg["id"], "perf": out} if out else None
 
 def main():
     funds = []
-    for job in [fundsmith_13f, independance, independance_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
