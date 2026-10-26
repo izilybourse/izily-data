@@ -11,7 +11,7 @@ import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "hmg": "", "gaylussac": "", "amiral": "",
+    "comgest": "", "gaylussac": "", "amiral": "",
 }
 
 def get(url):
@@ -394,9 +394,90 @@ def sunny():
     if rep: out["report"] = rep
     return out if len(out) > 1 else None
 
+
+# ---------------------------------------------------------------- HMG Finance (HMG Découvertes, part D)
+HMG_PAGE = "https://www.hmgfinance.com/opcvm/hmg-decouvertes-d/"
+HMG_AJAX = "https://www.hmgfinance.com/wp-admin/admin-ajax.php"
+
+def hmg():
+    """Dernier reporting mensuel 'Découvertes D' : encours, lignes, top 10, secteurs, capitalisations."""
+    import pdfplumber
+    html = get(HMG_PAGE).decode("utf8", "ignore")
+    cand = []
+    for u in re.findall(r'href=["\']([^"\']*[Rr]eporting-[Dd]ecouvertes-[Dd]-[^"\']*\.pdf)', html):
+        m = re.search(r"-(\d{2})-(\d{4})(?:-\d+)?\.pdf$", u) or re.search(r"-(\d{4})-(\d{2})\.pdf$", u)
+        if not m: continue
+        a, b = m.groups(); mo, yr = (a, b) if len(b) == 4 else (b, a)
+        cand.append(((int(yr), int(mo)), u, int(mo), int(yr)))
+    if not cand: return None
+    _, url, mo, yr = max(cand)
+    with pdfplumber.open(io.BytesIO(get(url))) as pdf:
+        txt = "\n".join((p.extract_text() or "") for p in pdf.pages[:3])
+    out = {"id": "hmg"}
+    import calendar
+    out["asOf"] = f"{calendar.monthrange(yr, mo)[1]:02d}/{mo:02d}/{yr}"
+    m = re.search(r"Actif net[^\d]{0,30}([\d\s]{6,15}[,.]?\d*)", txt, re.I)
+    if m:
+        v = float(re.sub(r"\s", "", m.group(1)).replace(",", ".") or 0)
+        if 1e6 < v < 5e10: out["aum"] = f"{v / 1e6:.1f}".replace(".", ",") + " M€"
+    m = re.search(r"Nombre de (?:lignes|titres|valeurs)[^\d]{0,20}(\d{2,3})", txt, re.I)
+    if m: out["nbHoldings"] = int(m.group(1))
+    sec = re.split(r"10 premi[èe]res? (?:lignes|positions|valeurs)|Principales (?:lignes|positions)", txt, maxsplit=1, flags=re.I)
+    rows = re.findall(r"^([A-Za-zÀ-ÿ0-9&.' \-]{3,40}?)\s+(\d{1,2}[,.]\d)\s*%\s*$", sec[-1] if len(sec) > 1 else "", re.M)
+    hold = [{"name": _fixname(n.strip()), "ticker": "", "pct": _f(p.replace(".", ","))} for n, p in rows][:10]
+    tot = sum(h["pct"] for h in hold)
+    if len(hold) == 10 and 20 <= tot <= 70:
+        out["holdings"] = hold; out["top10"] = round(tot, 1); out["holdingsLabel"] = "Top 10 (reporting mensuel, part D)"
+    rep = {}
+    mois = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"]
+    rep["asOf"] = mois[mo - 1] + " " + str(yr)
+    SEC = ["Industrie", "Matériaux", "Finance", "Technologie", "Conso. discrétionnaire", "Conso. de base", "Santé", "Services aux collectivités", "Énergie"]
+    names = {"Industrials": "Industrie", "Industrie": "Industrie", "Materials": "Matériaux", "Matériaux": "Matériaux", "Financials": "Finance", "Finance": "Finance", "Technology": "Technologie", "Technologie": "Technologie",
+             "Consommation discrétionnaire": "Conso. discrétionnaire", "Consommation de base": "Conso. de base", "Santé": "Santé", "Services aux collectivités": "Services aux collectivités", "Energie": "Énergie", "Énergie": "Énergie", "Liquidités": "Liquidités", "Cash": "Liquidités"}
+    secs = []
+    for lab, canon in names.items():
+        m = re.search(r"^" + re.escape(lab) + r"\s+(\d{1,2}[,.]\d)\s*%", txt, re.M | re.I)
+        if m and canon not in [s[0] for s in secs]: secs.append([canon, _f(m.group(1).replace(".", ","))])
+    if len(secs) >= 6 and 98 <= sum(x[1] for x in secs) <= 102: rep["sectors"] = sorted(secs, key=lambda x: -x[1])
+    caps = []
+    for lab, rx in (("< 150 M€", r"Moins de 150|<\s*150"), ("150 – 500 M€", r"150\s*M?€?\s*[-–à]\s*500"), ("500 M€ – 1 Md€", r"500\s*M?€?\s*[-–à]\s*1"), ("> 1 Md€", r"Plus de 1|>\s*1\s*(?:Md|bn)"), ("Liquidités", r"Liquidit|Cash")):
+        m = re.search(r"(?:" + rx + r")[^\n\d]{0,25}(\d{1,2}[,.]\d)\s*%", txt, re.I)
+        if m: caps.append([lab, _f(m.group(1).replace(".", ","))])
+    if len(caps) >= 4 and 98 <= sum(x[1] for x in caps) <= 102: rep["capBuckets"] = caps
+    out["report"] = rep
+    return out
+
+def hmg_perf():
+    page = get(HMG_PAGE).decode("utf8", "ignore")
+    nonce = re.search(r"nonce:\s*['\"]([0-9a-f]+)['\"]", page); fid = re.search(r"HMGChart\.init\(\s*['\"][^'\"]+['\"]\s*,\s*(\d+)", page)
+    if not (nonce and fid): raise ValueError("graphique HMG introuvable")
+    import urllib.parse, datetime as dt
+    def call(period):
+        body = urllib.parse.urlencode({"action": "hmg_fm_chart_data", "fond_id": fid.group(1), "period": period, "nonce": nonce.group(1)}).encode()
+        req = urllib.request.Request(HMG_AJAX, data=body, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/124 Safari/537.36", "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                                                                  "Origin": "https://www.hmgfinance.com", "Referer": HMG_PAGE})
+        j = json.loads(urllib.request.urlopen(req, timeout=60).read().decode("utf8"))
+        if not j.get("success"): raise ValueError("réponse négative du site")
+        d = j["data"]; L, f, b = d["labels"], d["fond"], d["indice"]
+        if not (len(L) == len(f) == len(b) >= 100): raise ValueError("série trop courte")
+        day = lambda s: round(dt.datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
+        pts = [[day(l), round(x, 1), round(y, 1)] for l, x, y in zip(L, f, b)]
+        if any(pts[i][0] >= pts[i + 1][0] for i in range(len(pts) - 1)): raise ValueError("dates non croissantes")
+        if len(pts) > 600:
+            st = len(pts) / 280; pts = [pts[int(k * st)] for k in range(280)] + [pts[-1]]
+        yrs = max((pts[-1][0] - pts[0][0]) / 365.25, 0.1)
+        fm = lambda v: ("%.1f" % v).replace(".", ",") + " %"
+        mk = lambda v, annual: {"cum": fm(v - 100), "ann": fm(((v / 100) ** (1 / yrs) - 1) * 100 if annual else v - 100), "vl": "", "from": L[0][:10], "to": L[-1][:10]}
+        return {"period": L[0][:10], "f": mk(pts[-1][1], yrs > 1.2), "b": mk(pts[-1][2], yrs > 1.2), "p": pts}
+    out = {}
+    for key, per in (("all", "all"), ("y1", "1year")):
+        try: out[key] = call(per)
+        except Exception as e: print("hmg perf", key, ":", e, file=sys.stderr)
+    return {"id": "hmg", "perf": out} if out else None
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
