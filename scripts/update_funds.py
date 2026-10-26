@@ -6,7 +6,7 @@ NON TESTÉ en conditions réelles : à lancer une première fois à la main (pyt
 2) Autres sociétés : factsheet PDF mensuelle -> top 10 (regex "Nom ... 4,52 %"). Renseigner les URL dans FACTSHEETS.
    Les fiches dont l'URL est vide ou dont l'analyse échoue sont simplement ignorées : la page garde ses données intégrées.
 """
-import io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as ET
+import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as ET
 
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
@@ -40,6 +40,14 @@ def factsheet(fid, url):
     import pdfplumber  # pip install pdfplumber
     with pdfplumber.open(io.BytesIO(get(url))) as pdf:
         text = "\n".join(p.extract_text() or "" for p in pdf.pages[:3])
+        visual = None
+        try:
+            idx = next((i for i, pg in enumerate(pdf.pages[:3]) if "Principaux investissements" in (pg.extract_text() or "")), 1)
+            os.makedirs("data", exist_ok=True)
+            pdf.pages[idx].to_image(resolution=130).save("data/independance-europe-mid.png")
+            visual = "independance-europe-mid.png"
+        except Exception as e:
+            print("independance : image de la page non extraite :", e, file=sys.stderr)
     rows = re.findall(r"^\s*\d{0,2}\.?\s*([A-Za-zÀ-ÿ&.' \-]{3,45}?)\s+(\d{1,2}[.,]\d{1,2})\s*%", text, re.M)
     hold = [{"name": n.strip(), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
     return {"id": fid, "holdings": hold} if len(hold) >= 5 else None
@@ -57,6 +65,14 @@ def independance():
     url, _, _, name = max(links, key=key)
     with pdfplumber.open(io.BytesIO(get(url))) as pdf:
         text = "\n".join(p.extract_text() or "" for p in pdf.pages[:3])
+        visual = None
+        try:
+            idx = next((i for i, pg in enumerate(pdf.pages[:3]) if "Principaux investissements" in (pg.extract_text() or "")), 1)
+            os.makedirs("data", exist_ok=True)
+            pdf.pages[idx].to_image(resolution=130).save("data/independance-europe-mid.png")
+            visual = "independance-europe-mid.png"
+        except Exception as e:
+            print("independance : image de la page non extraite :", e, file=sys.stderr)
     sec = text.split("Principaux investissements", 1)[-1][:900]
     rows = re.findall(r"([A-Za-zÀ-ÿ&.' \-]{2,40}?)\s+(\d{1,2},\d)\s*%", sec)
     hold = [{"name": n.strip(), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
@@ -68,6 +84,7 @@ def independance():
     m = re.search(r"(\d{2,3})\s*titres", text, re.I);      out["nbHoldings"] = int(m.group(1)) if m else None
     d = re.match(r"(\d{2})(\d{2})(\d{2})", name.replace("20251031", "251031"))
     if d: out["asOf"] = f"{d.group(3)}/{d.group(2)}/20{d.group(1)}"
+    if visual: out["visualFile"] = visual
     return {k: v for k, v in out.items() if v is not None}
 
 def main():
