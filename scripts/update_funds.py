@@ -9,9 +9,9 @@ NON TESTÉ en conditions réelles : à lancer une première fois à la main (pyt
 import io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as ET
 
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
-FUNDSMITH_CIK = "26000283"  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
+FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "carmignac": "", "flossbach": "", "moneta": "", "independance-am": "https://www.independance-am.com/wp-content/uploads/2026/10/260930-reporting-europe-mid-i-eur-c3-fr.pdf",
+    "comgest": "", "carmignac": "", "flossbach": "", "moneta": "",
 }
 
 def get(url):
@@ -44,9 +44,35 @@ def factsheet(fid, url):
     hold = [{"name": n.strip(), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
     return {"id": fid, "holdings": hold} if len(hold) >= 5 else None
 
+IAM_PAGE = "https://www.independance-am.com/nos-fonds/independance-europe-mid/"
+
+def independance():
+    """Retrouve seul le dernier reporting mensuel 'Europe Mid' sur la page du fonds, puis lit son top 10."""
+    import pdfplumber
+    html = get(IAM_PAGE).decode("utf8", "ignore")
+    links = re.findall(r'href=["\']([^"\']*/wp-content/uploads/(\d{4})/(\d{2})/([^"\'/]*reporting[^"\'/]*europe-mid[^"\'/]*\.pdf))', html, re.I)
+    if not links: return None
+    def key(l):
+        m = re.match(r"(\d{6,8})", l[3]); return (l[1], l[2], m.group(1)[-6:] if m else "")
+    url, _, _, name = max(links, key=key)
+    with pdfplumber.open(io.BytesIO(get(url))) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages[:3])
+    sec = text.split("Principaux investissements", 1)[-1][:900]
+    rows = re.findall(r"([A-Za-zÀ-ÿ&.' \-]{2,40}?)\s+(\d{1,2},\d)\s*%", sec)
+    hold = [{"name": n.strip(), "ticker": "", "pct": float(p.replace(",", "."))} for n, p in rows][:10]
+    tot = sum(h["pct"] for h in hold)
+    if not (8 <= len(hold) <= 10 and 20 <= tot <= 45 and all(0 < h["pct"] < 15 for h in hold)):
+        print("independance : top 10 illisible, données intégrées conservées", file=sys.stderr); return None
+    out = {"id": "independance-am", "holdings": hold, "top10": round(tot, 1), "holdingsLabel": "Top 10 (reporting mensuel, part I)"}
+    m = re.search(r"(\d[\d\s]{0,6})\s*M\s*€", text);   out["aum"] = m.group(1).strip() + " M€" if m else None
+    m = re.search(r"(\d{2,3})\s*titres", text, re.I);      out["nbHoldings"] = int(m.group(1)) if m else None
+    d = re.match(r"(\d{2})(\d{2})(\d{2})", name.replace("20251031", "251031"))
+    if d: out["asOf"] = f"{d.group(3)}/{d.group(2)}/20{d.group(1)}"
+    return {k: v for k, v in out.items() if v is not None}
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith_13f, independance] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
