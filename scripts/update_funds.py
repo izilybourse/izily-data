@@ -11,7 +11,7 @@ import io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as ET
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = "26000283"  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "", "carmignac": "", "flossbach": "", "moneta": "", "independance-am": "",
+    "comgest": "", "carmignac": "", "flossbach": "", "moneta": "", "independance-am": "https://www.independance-am.com/wp-content/uploads/2026/10/260930-reporting-europe-mid-i-eur-c3-fr.pdf",
 }
 
 def get(url):
