@@ -9,7 +9,7 @@ NON TESTÉ en conditions réelles : à lancer une première fois à la main (pyt
 import io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as ET
 
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
-FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
+FUNDSMITH_CIK = "26000283"  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
     "comgest": "", "carmignac": "", "flossbach": "", "moneta": "", "independance-am": "",
 }
