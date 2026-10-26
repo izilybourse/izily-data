@@ -11,7 +11,6 @@ import os, io, json, re, sys, urllib.request, datetime, xml.etree.ElementTree as
 UA = {"User-Agent": "izilyfire-data contact@izilyfire.fr"}  # la SEC exige un User-Agent identifiable
 FUNDSMITH_CIK = ""  # ex. "0001234567" : à chercher sur sec.gov/cgi-bin/browse-edgar?company=fundsmith
 FACTSHEETS = {      # id (identique à la page) -> URL du PDF mensuel le plus récent
-    "comgest": "",
 }
 
 def get(url):
@@ -506,8 +505,9 @@ def gaylussac():
     m = re.search(r"Nombre de lignes\s+(\d{2,3})", t)
     if m: out["nbHoldings"] = int(m.group(1))
     top = re.findall(r"^([A-Z0-9&.'\- ]{3,40}?)\s+(\d{1,2},\d)%", t, re.M)
-    hold = [{"name": _fixname(n.strip().title()), "ticker": "", "pct": _f(p)} for n, p in top if not n.startswith(("TAUX", "NOMBRE", "PER", "VE"))][:5]
-    if len(hold) == 5: out["holdings"] = hold; out["holdingsLabel"] = "Cinq premières positions (reporting mensuel, part I)"
+    bad = ("TAUX", "NOMBRE", "PER", "VE", "ROCE", "ROE", "BETA", "DETTE", "MARGE", "EV", "P/", "RENDEMENT", "ACTIF", "FRAIS", "VOLATIL", "SHARPE", "CAPITALISATION")
+    hold = [{"name": re.sub(r"\s+(Sa|Spa|Plc|Ab|Asa|Oyj|Nv|Ag|Se)$", "", _fixname(n.strip().title())), "ticker": "", "pct": _f(p)} for n, p in top if not n.strip().startswith(bad)][:5]
+    if len(hold) == 5 and all(h["pct"] <= 10 for h in hold) and 15 <= sum(h["pct"] for h in hold) <= 35: out["holdings"] = hold; out["holdingsLabel"] = "Cinq premières positions (reporting mensuel, part I)"
     # capitalisations
     cb = []
     for lab, rx in (("< 150 M€", r"Moins de 150 M€\s+(\d{1,2},\d)%"), ("150 – 500 M€", r"De 150 à 500 M€\s+(\d{1,2},\d)%"), ("> 500 M€", r"Plus de 500 M€\s+(\d{1,2},\d)%")):
@@ -559,7 +559,13 @@ def gaylussac_perf():
         try: return round(dt.datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
         except ValueError: return round(dt.datetime.strptime(s, "%d/%m/%Y").replace(tzinfo=dt.timezone.utc).timestamp() / 86400)
     ser = [(day(d), float(v)) for d, v in pts]
-    ser = [x for i, x in enumerate(ser) if i == 0 or x[0] > ser[i - 1][0]]
+    clean = []
+    for d, v in ser:
+        if v <= 0: continue
+        if clean and d <= clean[-1][0]: break          # une 2e série ou une ligne parasite : on s'arrête
+        clean.append((d, v))
+    ser = clean
+    if len(ser) < 100: raise ValueError("série trop courte après nettoyage")
     fm = lambda v: ("%.1f" % v).replace(".", ",") + " %"
     def build(ser, annual):
         d0, v0 = ser[0]; step = max(1, len(ser) // 280)
@@ -681,9 +687,116 @@ def sextant_perf():
     return {"id": "amiral", "perf": out}
 
 
+# ---------------------------------------------------------------- Fundsmith Equity Fund (SICAV, classe T Acc EUR)
+FS_PAGE = "https://www.fundsmith.eu/fr/fiche-d-information"
+
+def _txt(html):
+    html = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)</t[dh]>", "\t", html); html = re.sub(r"(?i)<br\s*/?>|</(p|div|li|tr|h\d|section|table)>", "\n", html)
+    import html as H
+    t = H.unescape(re.sub(r"<[^>]+>", " ", html)).replace("\xa0", " ")
+    return "\n".join(re.sub(r"[ ]+", " ", l).strip() for l in t.splitlines() if l.strip())
+
+def _fs_text():
+    return _txt(get(FS_PAGE).decode("utf8", "ignore"))
+
+def _num(x): return float(x.replace(",", ".").replace("+", ""))
+
+def fundsmith():
+    """Fiche d'information officielle de la SICAV : chiffres clés, top 10 (noms), pays, secteurs, commentaire."""
+    t = _fs_text(); out = {"id": "fundsmith", "url": FS_PAGE}; rep = {}
+    mois = {"janv": "01", "févr": "02", "mars": "03", "avr": "04", "mai": "05", "juin": "06", "juil": "07", "août": "08", "sept": "09", "oct": "10", "nov": "11", "déc": "12"}
+    m = re.search(r"En date du (\d{1,2}) ([a-zéû]+)\.? (\d{4})", t, re.I)
+    if m and m.group(2).lower()[:4].rstrip(".") in [k[:4] for k in mois]:
+        k = next(k for k in mois if m.group(2).lower().startswith(k)); out["asOf"] = f"{int(m.group(1)):02d}/{mois[k]}/{m.group(3)}"
+        full = {"01": "janvier", "02": "février", "03": "mars", "04": "avril", "05": "mai", "06": "juin", "07": "juillet", "08": "août", "09": "septembre", "10": "octobre", "11": "novembre", "12": "décembre"}[mois[k]]
+        rep["asOf"] = f"{int(m.group(1))} {full} {m.group(3)}"
+    m = re.search(r"Taille du fonds\s*€\s*([\d.,]+)\s*bn", t)
+    if m: out["aum"] = m.group(1).replace(".", ",") + " Md€"
+    m = re.search(r"Nombre de titres\s*(\d+)", t)
+    if m: out["nbHoldings"] = int(m.group(1))
+    m = re.search(r"Capitalisation boursière médiane\s*€\s*([\d.,]+)\s*bn", t)
+    if m: rep["capMed"] = m.group(1).replace(".", ",") + " Md€"
+    def block(a, b):
+        mm = re.search(a + r"(.*?)" + b, t, re.S)
+        return mm.group(1) if mm else ""
+    def pairs(txt, tr):
+        res = []
+        for lab, v in re.findall(r"^(.+?)[\s\t]+(\d{1,2}\.\d)\s*$", txt, re.M):
+            res.append([tr.get(lab.strip(), lab.strip()), _num(v)])
+        return res
+    geo = pairs(block(r"Répartition géographique", r"Répartition sectorielle"), {"US": "États-Unis", "UK": "Royaume-Uni"})
+    sec = pairs(block(r"Répartition sectorielle", r"Codes d.identification"), {"Technologies de l’information": "Technologies de l'information", "Biens de consommation discrétionnaire": "Biens de conso. discrétionnaire", "Produits de consommation courante": "Produits de consommation courante"})
+    if len(geo) >= 3 and 97 <= sum(x[1] for x in geo) <= 103: rep["geo"] = geo
+    if len(sec) >= 5 and 97 <= sum(x[1] for x in sec) <= 103: rep["sectors"] = sec
+    m = re.search(r"Commentaire sur le portefeuille[^\n]*\n(.+?)\nLes 10 participations", t, re.S)
+    if m: rep["comment"] = " ".join(m.group(1).split())
+    top = [l.strip() for l in block(r"Les 10 participations principales", r"Our values").splitlines() if l.strip()][:10]
+    if len(top) == 10 and all(len(x) < 40 for x in top):
+        out["holdings"] = [{"name": n, "ticker": "", "pct": None} for n in top]
+        out["holdingsLabel"] = "Les 10 participations principales (fiche de " + (rep.get("asOf") or "") + " — noms publiés, poids non communiqués)"
+    if rep: out["report"] = rep
+    return out if len(out) > 2 else None
+
+def fundsmith_perf():
+    """Courbe base 100 chaînée à partir du tableau des rendements mensuels (classe T Acc, EUR) + statistiques de la fiche."""
+    import datetime as dt, calendar
+    t = _fs_text(); rows = {}
+    for y, rest in re.findall(r"^(20\d\d)\s+(.+)$", block_perf(t), re.M):
+        vals = re.findall(r"[+-]?\d+\.\d", rest)
+        if len(vals) < 2: continue
+        rows[int(y)] = [float(v) for v in vals[:-1]]          # le dernier chiffre = total de l'année
+    if len(rows) < 10: raise ValueError("tableau mensuel Fundsmith introuvable")
+    y0 = min(rows); pts = []; v = 100.0
+    day = lambda d: (d - dt.date(1970, 1, 1)).days
+    for y in sorted(rows):
+        r = rows[y]; first = 12 - len(r) if y == y0 else 0
+        for i, x in enumerate(r):
+            m = first + i + 1
+            if not pts: pts.append([day(dt.date(y, m, 1)) - 1, 100.0])
+            v *= 1 + x / 100; pts.append([day(dt.date(y, m, calendar.monthrange(y, m)[1])), round(v, 2)])
+    fm = lambda a: ("%.1f" % a).replace(".", ",") + " %"
+    last = pts[-1]; iso = lambda d: (dt.date(1970, 1, 1) + dt.timedelta(days=d)).isoformat()
+    yrs = (last[0] - pts[0][0]) / 365.25
+    ann = (last[1] / 100) ** (1 / yrs) * 100 - 100
+    p12 = pts[-13:]; y1 = [[d, round(100 * x / p12[0][1], 2)] for d, x in p12]
+    mk = lambda c, a, p, vl="": {"cum": fm(c), "ann": fm(a), "vl": vl, "from": iso(p[0][0]), "to": iso(p[-1][0])}
+    allp = {"period": dt.date.fromordinal(dt.date(1970, 1, 1).toordinal() + pts[0][0] + 1).strftime("%d/%m/%Y"), "f": mk(last[1] - 100, ann, pts), "b": mk(0, 0, pts), "p": pts}
+    allp["b"] = {"cum": "", "ann": "", "vl": "", "from": iso(pts[0][0]), "to": iso(last[0])}
+    mv = re.search(r"T Class Acc\s+[\d.]+%\s+EUR [\d\s]+\s+([\d.]+)\s*€", t)
+    if mv: allp["f"]["vl"] = mv.group(1).replace(".", ",")
+    ytd = re.search(r"Fundsmith\d?\s+[+-]?\d+\.\d\s+([+-]?\d+\.\d)", t)
+    if ytd: allp["f"]["ytd"] = fm(_num(ytd.group(1)))
+    y1blk = {"period": dt.date.fromordinal(dt.date(1970, 1, 1).toordinal() + p12[0][0]).strftime("%d/%m/%Y"), "f": mk(p12[-1][1] / p12[0][1] * 100 - 100, p12[-1][1] / p12[0][1] * 100 - 100, p12), "b": {"cum": "", "ann": "", "vl": "", "from": iso(p12[0][0]), "to": iso(p12[-1][0])}, "p": y1}
+    return {"id": "fundsmith", "perf": {"all": allp, "y1": y1blk}}
+
+def block_perf(t):
+    m = re.search(r"Performance, % rendement total(.*?)Commentaire sur le portefeuille", t, re.S)
+    m2 = re.search(r"Tableau de performance mensuelle(.*?)Dividendes par action", t, re.S)
+    return (m.group(1) if m else "") + "\n" + (m2.group(1) if m2 else "")
+
+# ---------------------------------------------------------------- Comgest Growth Europe Opportunities (EUR Acc)
+CG_PAGE = "https://www.comgest.com/fr/fr/particulier/fonds/comgest-growth-europe-opportunities-eur-acc"
+
+def comgest():
+    """Chiffres clés de la page fonds (VL, actif total, nombre de titres, poids du top 10)."""
+    t = _txt(get(CG_PAGE).decode("utf8", "ignore")); out = {"id": "comgest", "url": CG_PAGE}
+    m = re.search(r"Actif total du fonds, en millions\s+([\d.,]+)\s*EUR", t)
+    if m: out["aum"] = m.group(1).replace(".", ",") + " M€"
+    m = re.search(r"Nombre de titres\s+(\d+)", t)
+    if m: out["nbHoldings"] = int(m.group(1))
+    m = re.search(r"Poids des 10 principales positions\s+([\d.,]+)\s*%", t)
+    if m: out["top10"] = _f(m.group(1))
+    vl = re.search(r"Valeur liquidative\s+([\d.,]+)\s*EUR", t); dv = re.search(r"Date de la valeur liquidative\s+(\d\d/\d\d/\d{4})", t)
+    if vl and dv:
+        out["extra"] = [["Valeur liquidative (" + dv.group(1) + ")", vl.group(1).replace(".", ",") + " €"], ["Indice de comparaison", "MSCI Europe NR"], ["Active share", "83,7 %"], ["Frais courants", "1,60 %"],
+                        ["Frais de gestion", "1,50 %"], ["ISIN", "IE00B4ZJ4188"], ["SFDR", "Article 8"], ["Éligibilité PEA", "Non"], ["Création du fonds", "07/08/2009"]]
+    return out if len(out) > 2 else None
+
+
 def main():
     funds = []
-    for job in [fundsmith_13f] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf, gaylussac, gaylussac_perf, sextant, sextant_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
+    for job in [fundsmith, fundsmith_perf, comgest] + [(lambda c=c: independance(c)) for c in IAM_FUNDS] + [(lambda c=c: independance_perf(c)) for c in IAM_FUNDS] + [sunny, sunny_perf, hmg, hmg_perf, gaylussac, gaylussac_perf, sextant, sextant_perf] + [lambda f=f, u=u: factsheet(f, u) for f, u in FACTSHEETS.items() if u]:
         try:
             r = job()
             if r: funds.append(r)
